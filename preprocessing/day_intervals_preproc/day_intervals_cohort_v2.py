@@ -283,6 +283,7 @@ def extract_data(use_ICU:str, label:str, time:int, icd_code:str, root_dir, disea
     use_admn=label=='Readmission'
     los=0
     use_los= label=='Length of Stay'
+    use_all = label == "ALL"
     
     #print(use_mort)
     #print(use_admn)
@@ -333,12 +334,41 @@ def extract_data(use_ICU:str, label:str, time:int, icd_code:str, root_dir, disea
         cohort, invalid = get_case_ctrls(pts, interval, group_col, visit_col, admit_col, disch_col,'min_valid_year', death_col, use_mort=False,use_admn=True,use_los=False)
     elif use_los:
         cohort, invalid = get_case_ctrls(pts, los, group_col, visit_col, admit_col, disch_col,'min_valid_year', death_col, use_mort=False,use_admn=False,use_los=True)
-    #print(cohort.head())
+    elif use_all:
+        cols = [group_col, visit_col, admit_col, disch_col, 'Age','gender','ethnicity','insurance', "mortality_label", "readmission_label", "los_label"]
+        cols.append(death_col) # in icu mortality
+        mort_cohort, invalid = get_case_ctrls(pts, None, group_col, visit_col, admit_col, disch_col,'min_valid_year', death_col, use_mort=True,use_admn=False,use_los=False)
+        assert invalid.shape[0] == 0
+        print(f"cohort shape: {mort_cohort.shape}\ninvalid shape: {invalid.shape}\n")
+
+        los=3 # 3 day los
+        los_cohort, invalid = get_case_ctrls(pts, los, group_col, visit_col, admit_col, disch_col,'min_valid_year', death_col, use_mort=False,use_admn=False,use_los=True)
+        assert invalid.shape[0] == 0
+        print(f"cohort shape: {los_cohort.shape}\ninvalid shape: {invalid.shape}\n")
+
+        interval = 30 # 30 day readmission
+        adm_cohort, invalid = get_case_ctrls(pts, interval, group_col, visit_col, admit_col, disch_col,'min_valid_year', death_col, use_mort=False,use_admn=True,use_los=False)
+        assert invalid.shape[0] == 0
+        print(f"cohort shape: {adm_cohort.shape}\ninvalid shape: {invalid.shape}\n")
+
+        mort_cohort.rename(columns={"label":"mortality_label"}, inplace=True)
+        adm_cohort.rename(columns={"label":"readmission_label"}, inplace=True)
+        los_cohort.rename(columns={"label":"los_label"}, inplace=True)
+
+        if use_ICU:
+            merge_on = ["subject_id", "stay_id", "hadm_id"]
+        else:
+            merge_on = ["subject_id", "hadm_id"]
+        
+        cohort = mort_cohort
+        cohort = mort_cohort.merge(adm_cohort[merge_on + ["readmission_label"]], how='left', on=merge_on)
+        cohort = cohort.merge(los_cohort[merge_on + ["los_label"]], how='left', on=merge_on)
+        assert cohort.mortality_label.isna().sum() + cohort.readmission_label.isna().sum() + cohort.los_label.isna().sum() == 0
     
     if use_ICU:
         cols.append(adm_visit_col)
     #print(cohort.head())
-    
+
     if use_disease:
         hids=disease_cohort.extract_diag_cohort(cohort['hadm_id'],icd_code,root_dir+"/mimiciv/2.0/")
         #print(hids.shape)
@@ -357,8 +387,8 @@ def extract_data(use_ICU:str, label:str, time:int, icd_code:str, root_dir, disea
         f"{label} FOR {ICU} DATA",
         f"# Admission Records: {cohort.shape[0]}",
         f"# Patients: {cohort[group_col].nunique()}",
-        f"# Positive cases: {cohort[cohort['label']==1].shape[0]}",
-        f"# Negative cases: {cohort[cohort['label']==0].shape[0]}"
+        # f"# Positive cases: {cohort[cohort['label']==1].shape[0]}",
+        # f"# Negative cases: {cohort[cohort['label']==0].shape[0]}"
     ])
 
     # save basic summary of data

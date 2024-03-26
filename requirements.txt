@@ -7,3 +7,7 @@ pandas==1.0.5
 scikit_learn==1.0.2
 torch==1.6.0
 tqdm==4.47.0
+xgboost
+imblearn
+captum
+pytorch-pretrained-bert

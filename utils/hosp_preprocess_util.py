@@ -397,7 +397,12 @@ def preproc_icd_module(module_path:str, adm_cohort_path:str, icd_map_path=None, 
         #print(adm_cohort.head())
         
         #adm_cohort = adm_cohort.loc[(adm_cohort.timedelta_years <= 6) & (~adm_cohort.timedelta_years.isna())]
-        return module.merge(adm_cohort[['hadm_id', 'label']], how='inner', left_on='hadm_id', right_on='hadm_id')
+        if "label" in adm_cohort.columns:
+            return module.merge(adm_cohort[['hadm_id', 'label']], how='inner', left_on='hadm_id', right_on='hadm_id')
+        else:
+            return module.merge(adm_cohort[['hadm_id', 'mortality_label', 'readmission_label', 'los_label']], how='inner', left_on='hadm_id', right_on='hadm_id')
+
+        
 
     def standardize_icd(mapping, df, root=False):
         """Takes an ICD9 -> ICD10 mapping table and a modulenosis dataframe; adds column with converted ICD10 column"""
