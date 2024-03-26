@@ -6,6 +6,9 @@ import pandas as pd
 from pandas.api.types import union_categoricals
 from sklearn.model_selection import train_test_split
 import pickle
+from functools import partial
+from tqdm.auto import tqdm
+tqdm.pandas()
 
 module_path='preprocessing/day_intervals_preproc'
 if module_path not in sys.path:
@@ -225,9 +228,14 @@ def generate_encounters_and_splits():
     # generate splits
     train, non_train = train_test_split(enc.patient_id.unique().tolist(), test_size=0.2, random_state=87541)
     test, val = train_test_split(non_train, test_size=0.2, random_state=190847)
-    pickle.dump(train, open(os.path.join(hf_subtype_output_dir, "train_patient_ids.pkl"), "wb"))
-    pickle.dump(test, open(os.path.join(hf_subtype_output_dir, "test_patient_ids.pkl"), "wb"))
-    pickle.dump(val, open(os.path.join(hf_subtype_output_dir, "val_patient_ids.pkl"), "wb"))
+    df = enc[['patient_id', 'stay_id']].drop_duplicates()
+    patient_id_to_stay_id = {key: group["stay_id"].unique().tolist() for key, group in df.groupby("patient_id")}
+    train_stay_ids = [stay_id for patient_id in train for stay_id in patient_id_to_stay_id[patient_id]]
+    test_stay_ids = [stay_id for patient_id in test for stay_id in patient_id_to_stay_id[patient_id]]
+    val_stay_ids = [stay_id for patient_id in val for stay_id in patient_id_to_stay_id[patient_id]]
+    pickle.dump(train_stay_ids, open(os.path.join(hf_subtype_output_dir, "train_patient_ids.pkl"), "wb"))
+    pickle.dump(test_stay_ids, open(os.path.join(hf_subtype_output_dir, "test_patient_ids.pkl"), "wb"))
+    pickle.dump(val_stay_ids, open(os.path.join(hf_subtype_output_dir, "val_patient_ids.pkl"), "wb"))
 
 
 def normalize(df, train_mrns, patient_id="mgh_mrn"):
@@ -283,15 +291,11 @@ def filter_data():
     df.loc[df['variable'].isin(rare_vars), 'variable'] = 'rare_variable'
     df['variable'] = df['variable'].cat.remove_unused_categories()
     df['variable'] = df['variable'].cat.codes
-    df.sort_values(by=["patient_id", "date"], inplace=True)
+    df.sort_values(by=["patient_id", "date", "variable"], inplace=True)
+    df.dropna(subset=['patient_id', 'date', 'variable', 'value'], inplace=True)
     df.to_pickle(os.path.join(hf_subtype_output_dir, "timeseries.pkl"))
     data_dict = dict(list(df.groupby("patient_id")))
     pickle.dump(data_dict, open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "wb"))
-
-
-# generate_icu_triplets()
-# generate_encounters_and_splits()
-# filter_data()
 
 
 def generate_events():
@@ -306,17 +310,159 @@ def generate_events():
     map_events = cont_df[cont_df.variable.isin(map_itemids)]
     pao2_events = cont_df[cont_df.variable.isin(pao2_itemids)]
     sao2_events = cont_df[cont_df.variable.isin(sao2_itemids)]
+    hemocrit_itemids = ['220545', "226540"]
+    creatanine_itemids = ['220615', '229761']
+    pco2_itemids = ['220235']
+    ph_itemids = ['223830'] # venous and dipstick are left out: , '220274', '220734'
+    potasium_itemids = ['220640', '227442']
+    sodium_itemids = ['220645', '228389']
+    hr_itemids = ['220045']
+    lactic_acid_itemids = ['225668']
+    urine_itemids = ['226627', '226631']
+    glucose_itemids = ['220621']
+    bilirubin_itemids = ['225690']
+    platelet_itemids = ['225170', '225678', '226369', '227071', '227457']
+    wbc_itemids = ['220546']
+    
+    liver_enzyme_alt_itemid = ['220644'] #ALT
+    liver_enzyme_ast_itemid = ['220587'] #AST labs
+    
+    # import pdb; pdb.set_trace()
+    
+    liver_enzyme_alt_event = cont_df[cont_df.variable.isin(liver_enzyme_alt_itemid)]
+    liver_enzyme_ast_event = cont_df[cont_df.variable.isin(liver_enzyme_ast_itemid)]
+    liver_enzyme_alt_event = liver_enzyme_alt_event[liver_enzyme_alt_event.value > 3*56]
+    liver_enzyme_ast_event = liver_enzyme_ast_event[liver_enzyme_ast_event.value > 3*40]
+    liver_enzyme_event = concatenate([liver_enzyme_alt_event, liver_enzyme_ast_event])
+    
+    wbc_event = cont_df[cont_df.variable.isin(wbc_itemids)]
+    leukocytopenia_event = wbc_event[(wbc_event.value < 4)]
+    leukocytosis_event = wbc_event[(wbc_event.value > 12)]
+    
+    thrombocytopenia_event = cont_df[cont_df.variable.isin(platelet_itemids)]
+    thrombocytopenia_event = thrombocytopenia_event[(thrombocytopenia_event.value < 50)]
+
+    thrombocytosis_event = cont_df[cont_df.variable.isin(platelet_itemids)]
+    thrombocytosis_event = thrombocytosis_event[(thrombocytosis_event.value > 500)] # 450,000 cells/nL
+    
+    lactic_event = cont_df[cont_df.variable.isin(lactic_acid_itemids)]
+    lactic_event = lactic_event[lactic_event.value > 2]
+    
+    bilirubin_events = cont_df[cont_df.variable.isin(bilirubin_itemids)]
+    bilirubin_events = bilirubin_events[bilirubin_events.value > 2]
+    
+    # urine_event = cont_df[cont_df.variable.isin(urine_itemids)]
+    # urine_event = urine_event[urine_event.value < 500]
+    
+    hyperglycemia_event = cont_df[cont_df.variable.isin(glucose_itemids)]
+    hyperglycemia_event = hyperglycemia_event[hyperglycemia_event.value > 180]
+    
+    hypoglycemia_event = cont_df[cont_df.variable.isin(glucose_itemids)]
+    hypoglycemia_event = hypoglycemia_event[hypoglycemia_event.value < 70]
+
+    hyperkalemia_event = cont_df[cont_df.variable.isin(potasium_itemids)]
+    hyperkalemia_event = hyperkalemia_event[hyperkalemia_event.value > 5.5]
+    hyponatremia_event = cont_df[cont_df.variable.isin(sodium_itemids)]
+    hyponatremia_event = hyponatremia_event[hyponatremia_event.value < 135]
 
     hypotension_events = map_events[map_events.value <= 60]
-    hypoxia_events = pd.concat([pao2_events[pao2_events.value <= 90], sao2_events[sao2_events.value <= 90]])
+    hypoxia_events = pd.concat([pao2_events[pao2_events.value <= 60], sao2_events[sao2_events.value <= 90]])
+
     mechanical_vent_events = cat_df[cat_df.value.isin(mask_ventilation_itemids)]
 
-    events = pd.concat([hypotension_events, hypoxia_events, mechanical_vent_events])
-    print(hypotension_events.stay_id.nunique())
-    print(hypoxia_events.stay_id.nunique())
-    print(mechanical_vent_events.stay_id.nunique())
-    print(events.stay_id.nunique())
-    import pdb; pdb.set_trace()
+    hemo_events = cont_df[cont_df.variable.isin(hemocrit_itemids)]
+    hemo_events = hemo_events[hemo_events.value < 30]
     
+    ph_events = cont_df[cont_df.variable.isin(ph_itemids)]
+    ph_events = ph_events[(ph_events.value < 7.35) | (ph_events.value > 7.45)]
+    
+    
+    # print("gcs events")
+    # for event_check in ['220739', "223900", "223901", "226755", "226756", "226757"]:
+    #     print(f"check event: {event_check}")
+    #     print((cont_df.variable == event_check).sum())
+    #     print((cont_df.value == event_check).sum())
+    #     print((cat_df.variable == event_check).sum())
+    #     print((cat_df.value == event_check).sum())
+    #     print("\n")
+    creatanine_event = cont_df[cont_df.variable.isin(creatanine_itemids)]
+    renal_events = creatanine_event[creatanine_event.value > 1.2]
+    hypercapnia_event = cont_df[cont_df.variable.isin(pco2_itemids)]
+    hypercapnia_event = hypercapnia_event[hypercapnia_event.value > 45]
+    
+    hr_event = cont_df[cont_df.variable.isin(hr_itemids)]
+    hr_event = cont_df[cont_df.value > 200]
 
-generate_events()
+    events_dict = {
+        "hypotension": hypotension_events,
+        "hypoxemia": hypoxia_events,
+        "mechanical_ventilation": mechanical_vent_events,
+        "renal_dysfunction": renal_events,
+        "hypercapnia": hypercapnia_event,
+        "ph": ph_events,
+        "hyperkalemia": hyperkalemia_event,
+        "hyponatremia": hyponatremia_event,
+        "hypoglycemia": hypoglycemia_event,
+        # "hyperglycemia": hyperglycemia_event,
+        "lactic_acidosis": lactic_event,
+        "bilirubin": bilirubin_events,
+        # "urine_output": urine_event,
+        "thrombocytopenia": thrombocytopenia_event,
+        "thrombocytosis": thrombocytosis_event,
+        "leukocytopenia": leukocytopenia_event,
+        "leukocytosis": leukocytosis_event,
+        "liver_enzyme": liver_enzyme_event,
+    }
+    for event_type, event_df in events_dict.items():
+        print(f"Number of {event_type} patients: {event_df.stay_id.nunique()}")
+        event_df['type'] = event_type
+        event_df['type'] = event_df['type'].astype('category')
+    events = concatenate(events_dict.values(), ignore_index=True)
+    # import pdb; pdb.set_trace()
+    events = events.merge(cohort[['stay_id', 'mortality_label', 'readmission_label', 'los_label', 'dod']], on='stay_id', how='left')
+    events.rename(columns={"stay_id": "patient_id"}, inplace=True)
+    events.to_pickle(os.path.join(hf_subtype_output_dir, "encounter.pkl"))
+
+
+def check_sufficient(data_dict, enc):
+    patient_id = enc.patient_id
+    data = data_dict[patient_id]
+    left_len = (data.date <= enc.date).sum()
+    right_len = (data.date > enc.date).sum()
+    sufficient = (left_len >= 16) and (right_len >= 16)
+    return sufficient
+
+
+def get_processed_encounters():
+    hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicIcu/"
+    encounters = pd.read_pickle(os.path.join(hf_subtype_output_dir, "encounter.pkl"))
+    cohort = pd.read_csv("/storage/nassim/projects/MIMIC-IV-Data-Pipeline/data/cohort/cohort_icu_all_0_.csv.gz", compression='gzip',header=0)
+    cohort['intime'] = pd.to_datetime(cohort.intime)
+    cohort['outtime'] = pd.to_datetime(cohort.outtime)
+    encounters = encounters.merge(cohort[['stay_id', 'intime', 'outtime']].rename(columns={'stay_id': "patient_id"}), on='patient_id', how='left')
+    encounters.rename(columns={"outtime": "discharge_date"}, inplace=True)
+    encounters = encounters[(encounters.date >= encounters.intime) & (encounters.date <= encounters.discharge_date)]
+    print("Before groupby:", encounters.shape)
+    print(encounters.patient_id.nunique())
+    encounters.sort_values(by=["patient_id", "type", "date"], inplace=True)  # Sort by patient_id, type, and date
+    encounters.drop_duplicates(subset=['patient_id', 'type'], inplace=True, keep='first')  # Keep only the first encounter for each patient and type combination
+    encounters.reset_index(inplace=True, drop=True)
+    print("After groupby:", encounters.shape)
+    encounters.to_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
+
+
+def get_sufficient_encounters():
+    hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicIcu/"
+    encounters = pd.read_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
+    data_dict = pickle.load(open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "rb"))
+    print('processing sufficient encounters')
+    sufficient_encounters = encounters[encounters.progress_apply(partial(check_sufficient, data_dict), axis=1)]
+    sufficient_encounters.to_pickle(os.path.join(hf_subtype_output_dir, "sufficient_encounters.pkl"))
+
+
+# generate_icu_triplets()
+# generate_encounters_and_splits()
+filter_data()
+# generate_events()
+# get_processed_encounters()
+# get_sufficient_encounters()

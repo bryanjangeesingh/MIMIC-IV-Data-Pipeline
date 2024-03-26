@@ -6,6 +6,9 @@ import pandas as pd
 from pandas.api.types import union_categoricals
 from sklearn.model_selection import train_test_split
 import pickle
+from functools import partial
+from tqdm.auto import tqdm
+tqdm.pandas()
 
 module_path='preprocessing/day_intervals_preproc'
 if module_path not in sys.path:
@@ -298,12 +301,39 @@ def filter_data():
     df.loc[df['variable'].isin(rare_vars), 'variable'] = 'rare_variable'
     df['variable'] = df['variable'].cat.remove_unused_categories()
     df['variable'] = df['variable'].cat.codes
-    df.sort_values(by=["patient_id", "date"], inplace=True)
+    df.sort_values(by=["patient_id", "date", "variable"], inplace=True)
+    df.dropna(subset=['patient_id', 'date', 'variable', 'value'], inplace=True)
     df.to_pickle(os.path.join(hf_subtype_output_dir, "timeseries.pkl"))
     data_dict = dict(list(df.groupby("patient_id")))
     pickle.dump(data_dict, open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "wb"))
 
 
+def check_sufficient(data_dict, enc):
+    patient_id = enc.patient_id
+    data = data_dict[patient_id]
+    left_len = (data.date <= enc.date).sum()
+    right_len = ((data.date > enc.date) & (data.date <= enc.discharge_date)).sum()
+    sufficient = (left_len >= 16) and (right_len >= 16)
+    return sufficient
+
+
+def get_sufficient_encounters():
+    hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicAdmission/"
+    cohort = pd.read_csv("/storage/nassim/projects/MIMIC-IV-Data-Pipeline/data/cohort/cohort_non-icu_all_0_.csv.gz", compression='gzip',header=0)
+    cohort.rename(columns={"admittime": "date", "dischtime": "discharge_date", "subject_id": "patient_id"}, inplace=True)
+    encounters = cohort[['patient_id', 'date', 'discharge_date', 'mortality_label', 'readmission_label', 'los_label', 'dod']]
+    data_dict = pickle.load(open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "rb"))
+    print('processing sufficient encounters')
+    encounters = encounters[encounters.patient_id.isin(data_dict.keys())]
+    encounters['date'] = pd.to_datetime(encounters.date)
+    encounters['discharge_date'] = pd.to_datetime(encounters.discharge_date)
+    encounters = encounters[(((encounters.discharge_date - encounters.date) / pd.Timedelta(days=1)) >= 4/24)] # LOS must be at least 4 hours
+    encounters.to_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
+    sufficient_encounters = encounters[encounters.progress_apply(partial(check_sufficient, data_dict), axis=1)]
+    sufficient_encounters.to_pickle(os.path.join(hf_subtype_output_dir, "sufficient_encounters.pkl"))
+    print(sufficient_encounters.shape)
+
 # generate_inpatient_triplets()
 # generate_encounters_and_splits()
 # filter_data()
+# get_sufficient_encounters()
