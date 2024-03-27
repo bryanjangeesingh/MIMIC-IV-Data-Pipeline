@@ -146,26 +146,15 @@ def generate_icu_triplets():
     diag['value'] = diag.value.astype('category')
     diag['is_cat'] = 1
 
-    # triplet encode meds
-    # med start date
-    print('processing med start dates')
-    med_start = med[['stay_id', 'itemid', 'starttime']]
-    med_start['starttime'] = pd.to_datetime(med_start['starttime'])
-    med_start.rename(columns={'starttime': 'date', 'itemid': 'variable'}, inplace=True)
-    med_start['value'] = "med_start"
-    med_start['value'] = med_start.value.astype('category')
-    med_start['variable'] = med_start['variable'].astype(str).astype('category')
-    med_start = med_start[["stay_id", "date", 'variable', "value"]]
-    med_start['is_cat'] = 1
-
+    # # triplet encode meds
     # med end date
     print('processing med end dates')
     med_end = med[['stay_id', 'itemid', 'endtime']]
     med_end['endtime'] = pd.to_datetime(med_end['endtime'])
-    med_end.rename(columns={'endtime': 'date', 'itemid': 'variable'}, inplace=True)
-    med_end['value'] = "med_end"
-    med_end['value'] = med_end.value.astype('category')
-    med_end['variable'] = med_end['variable'].astype(str).astype('category')
+    med_end.rename(columns={'endtime': 'date', 'itemid': 'value'}, inplace=True)
+    med_end['value'] = med_end.value.astype(str).astype('category')
+    med_end['variable'] = "med_end"
+    med_end['variable'] = med_end['variable'].astype('category')
     med_end = med_end[["stay_id", "date", 'variable', "value"]]
     med_end['is_cat'] = 1
 
@@ -199,7 +188,7 @@ def generate_icu_triplets():
 
     # concatenating
     print("concatenating dfs")
-    cat_df = concatenate([diag, med_start, med_end, proc, out], ignore_index=True)
+    cat_df = concatenate([diag, med_end, proc, out], ignore_index=True)
     cont_df = concatenate([chart, med_rate], ignore_index=True)
     cat_df = cat_df.reset_index(drop=True)
     cont_df = cont_df.reset_index(drop=True)
@@ -263,6 +252,7 @@ def normalize(df, train_mrns, patient_id="mgh_mrn"):
     return df, mapping
 
 def filter_data():
+    print('[FILTERING DATA]')
     hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicIcu"
     cat_df = pd.read_pickle(os.path.join(hf_subtype_output_dir, "raw_cat_timeseries.pkl"))
     cont_df = pd.read_pickle(os.path.join(hf_subtype_output_dir, "raw_cont_timeseries.pkl"))
@@ -273,24 +263,40 @@ def filter_data():
     cont_df = cont_df.merge(cohort[['stay_id', 'subject_id']], on='stay_id', how='left')
     cont_df = cont_df[["stay_id", "date", "variable", "value", "is_cat", "raw_index"]].rename(columns={"stay_id": "patient_id"})
     assert cont_df.patient_id.isna().sum() == 0
+    # group rare cat_df values and label encode
     val_counts = cat_df.value.value_counts()
     rare_values = val_counts.index[val_counts < 1000]
     cat_df['value'] = cat_df['value'].cat.add_categories(['rare_value'])
     cat_df.loc[cat_df['value'].isin(rare_values), 'value'] = 'rare_value'
     cat_df['value'] = cat_df['value'].cat.remove_unused_categories()
     cat_df['value'] = cat_df['value'].cat.codes
+    
+    # group rare cat_df variables and label encode
+    var_counts = cat_df.variable.value_counts()
+    rare_vars = var_counts.index[var_counts < 1000]
+    cat_df['variable'] = cat_df['variable'].cat.add_categories(['rare_cat_variable'])
+    cat_df.loc[cat_df['variable'].isin(rare_vars), 'variable'] = 'rare_cat_variable'
+    cat_df['variable'] = cat_df['variable'].cat.remove_unused_categories()
+    cat_df['variable'] = cat_df['variable'].cat.codes
+    
+    # group rare cont_df variables and label encode
+    var_counts = cont_df.variable.value_counts()
+    rare_vars = var_counts.index[var_counts < 1000]
+    cont_df['variable'] = cont_df['variable'].cat.add_categories(['rare_cont_variable'])
+    cont_df.loc[cont_df['variable'].isin(rare_vars), 'variable'] = 'rare_cont_variable'
+    cont_df['variable'] = cont_df['variable'].astype('category')
+    cont_df['variable'] = cont_df['variable'].cat.remove_unused_categories()
+    cont_df['variable'] = cont_df['variable'].cat.codes + cat_df['variable'].max() + 1
 
     train_patient_ids = pickle.load(open(os.path.join(hf_subtype_output_dir, "train_patient_ids.pkl"), "rb"))
     cont_df = normalize(cont_df, train_mrns=train_patient_ids, patient_id="patient_id")[0]
+    
+    print(f"cat_df.variable.max(): {cat_df.variable.max()}")
+    print(f"cat_df.value.max(): {cat_df.value.max()}")
+    print(f"cont_df.variable.max(): {cont_df.variable.max()}")
 
     df = concatenate([cat_df, cont_df])
 
-    var_counts = df.variable.value_counts()
-    rare_vars = var_counts.index[var_counts < 1000]
-    df['variable'] = df['variable'].cat.add_categories(['rare_variable'])
-    df.loc[df['variable'].isin(rare_vars), 'variable'] = 'rare_variable'
-    df['variable'] = df['variable'].cat.remove_unused_categories()
-    df['variable'] = df['variable'].cat.codes
     df.sort_values(by=["patient_id", "date", "variable"], inplace=True)
     df.dropna(subset=['patient_id', 'date', 'variable', 'value'], inplace=True)
     df.to_pickle(os.path.join(hf_subtype_output_dir, "timeseries.pkl"))
@@ -316,9 +322,7 @@ def generate_events():
     ph_itemids = ['223830'] # venous and dipstick are left out: , '220274', '220734'
     potasium_itemids = ['220640', '227442']
     sodium_itemids = ['220645', '228389']
-    hr_itemids = ['220045']
     lactic_acid_itemids = ['225668']
-    urine_itemids = ['226627', '226631']
     glucose_itemids = ['220621']
     bilirubin_itemids = ['225690']
     platelet_itemids = ['225170', '225678', '226369', '227071', '227457']
@@ -351,12 +355,6 @@ def generate_events():
     bilirubin_events = cont_df[cont_df.variable.isin(bilirubin_itemids)]
     bilirubin_events = bilirubin_events[bilirubin_events.value > 2]
     
-    # urine_event = cont_df[cont_df.variable.isin(urine_itemids)]
-    # urine_event = urine_event[urine_event.value < 500]
-    
-    hyperglycemia_event = cont_df[cont_df.variable.isin(glucose_itemids)]
-    hyperglycemia_event = hyperglycemia_event[hyperglycemia_event.value > 180]
-    
     hypoglycemia_event = cont_df[cont_df.variable.isin(glucose_itemids)]
     hypoglycemia_event = hypoglycemia_event[hypoglycemia_event.value < 70]
 
@@ -375,23 +373,11 @@ def generate_events():
     
     ph_events = cont_df[cont_df.variable.isin(ph_itemids)]
     ph_events = ph_events[(ph_events.value < 7.35) | (ph_events.value > 7.45)]
-    
-    
-    # print("gcs events")
-    # for event_check in ['220739', "223900", "223901", "226755", "226756", "226757"]:
-    #     print(f"check event: {event_check}")
-    #     print((cont_df.variable == event_check).sum())
-    #     print((cont_df.value == event_check).sum())
-    #     print((cat_df.variable == event_check).sum())
-    #     print((cat_df.value == event_check).sum())
-    #     print("\n")
+
     creatanine_event = cont_df[cont_df.variable.isin(creatanine_itemids)]
     renal_events = creatanine_event[creatanine_event.value > 1.2]
     hypercapnia_event = cont_df[cont_df.variable.isin(pco2_itemids)]
     hypercapnia_event = hypercapnia_event[hypercapnia_event.value > 45]
-    
-    hr_event = cont_df[cont_df.variable.isin(hr_itemids)]
-    hr_event = cont_df[cont_df.value > 200]
 
     events_dict = {
         "hypotension": hypotension_events,
@@ -403,10 +389,8 @@ def generate_events():
         "hyperkalemia": hyperkalemia_event,
         "hyponatremia": hyponatremia_event,
         "hypoglycemia": hypoglycemia_event,
-        # "hyperglycemia": hyperglycemia_event,
         "lactic_acidosis": lactic_event,
         "bilirubin": bilirubin_events,
-        # "urine_output": urine_event,
         "thrombocytopenia": thrombocytopenia_event,
         "thrombocytosis": thrombocytosis_event,
         "leukocytopenia": leukocytopenia_event,
@@ -452,17 +436,20 @@ def get_processed_encounters():
 
 
 def get_sufficient_encounters():
+    print("[GET SUFFICIENT ENCOUNTERS]")
     hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicIcu/"
     encounters = pd.read_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
     data_dict = pickle.load(open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "rb"))
+    print(f"Number of encounters: {encounters.shape[0]}")
     print('processing sufficient encounters')
     sufficient_encounters = encounters[encounters.progress_apply(partial(check_sufficient, data_dict), axis=1)]
     sufficient_encounters.to_pickle(os.path.join(hf_subtype_output_dir, "sufficient_encounters.pkl"))
+    print(f"Number of sufficient encounters: {sufficient_encounters.shape[0]}")
 
 
 # generate_icu_triplets()
 # generate_encounters_and_splits()
-filter_data()
+# filter_data()
 # generate_events()
 # get_processed_encounters()
-# get_sufficient_encounters()
+get_sufficient_encounters()

@@ -150,24 +150,13 @@ def generate_inpatient_triplets():
     diag['is_cat'] = 1
 
     # triplet encode meds
-    # med start date
-    print('processing med start dates')
-    med_start = med[['hadm_id', 'drug_name', 'starttime']]
-    med_start['starttime'] = pd.to_datetime(med_start['starttime'])
-    med_start.rename(columns={'starttime': 'date', 'drug_name': 'variable'}, inplace=True)
-    med_start['value'] = "med_start"
-    med_start['value'] = med_start.value.astype('category')
-    med_start['variable'] = med_start['variable'].astype('category')
-    med_start = med_start[["hadm_id", "date", 'variable', "value"]]
-    med_start['is_cat'] = 1
-
     # med end date
     print('processing med end dates')
     med_end = med[['hadm_id', 'drug_name', 'stoptime']]
     med_end['stoptime'] = pd.to_datetime(med_end['stoptime'])
-    med_end.rename(columns={'stoptime': 'date', 'drug_name': 'variable'}, inplace=True)
-    med_end['value'] = "med_end"
-    med_end['value'] = med_end.value.astype('category')
+    med_end.rename(columns={'stoptime': 'date', 'drug_name': 'value'}, inplace=True)
+    med_end['value'] = med_end.value.astype(str).astype('category')
+    med_end['variable'] = "med_end"
     med_end['variable'] = med_end['variable'].astype('category')
     med_end = med_end[["hadm_id", "date", 'variable', "value"]]
     med_end['is_cat'] = 1
@@ -203,7 +192,7 @@ def generate_inpatient_triplets():
 
     # concatenate dfs
     print("concatenating dfs")
-    cat_df = concatenate([diag, med_start, med_end, proc, enc], ignore_index=True)
+    cat_df = concatenate([diag, med_end, proc, enc], ignore_index=True)
     cont_df = concatenate([labs, med_rate], ignore_index=True)
     cat_df = cat_df.reset_index(drop=True)
     cont_df = cont_df.reset_index(drop=True)
@@ -271,6 +260,7 @@ def make_numeric(x):
 
 
 def filter_data():
+    print('[FILTERING DATA]')
     hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicAdmission"
     cat_df = pd.read_pickle(os.path.join(hf_subtype_output_dir, "raw_cat_timeseries.pkl"))
     cont_df = pd.read_pickle(os.path.join(hf_subtype_output_dir, "raw_cont_timeseries.pkl"))
@@ -281,26 +271,42 @@ def filter_data():
     cont_df = cont_df.merge(cohort[['hadm_id', 'subject_id']], on='hadm_id', how='left')
     cont_df = cont_df[["subject_id", "date", "variable", "value", "is_cat", "raw_index"]].rename(columns={"subject_id": "patient_id"})
     assert cont_df.patient_id.isna().sum() == 0
+    # group rare cat_df values and label encode
     val_counts = cat_df.value.value_counts()
     rare_values = val_counts.index[val_counts < 1000]
     cat_df['value'] = cat_df['value'].cat.add_categories(['rare_value'])
     cat_df.loc[cat_df['value'].isin(rare_values), 'value'] = 'rare_value'
     cat_df['value'] = cat_df['value'].cat.remove_unused_categories()
     cat_df['value'] = cat_df['value'].cat.codes
+    
+    # group rare cat_df variables and label encode
+    var_counts = cat_df.variable.value_counts()
+    rare_vars = var_counts.index[var_counts < 1000]
+    cat_df['variable'] = cat_df['variable'].cat.add_categories(['rare_cat_variable'])
+    cat_df.loc[cat_df['variable'].isin(rare_vars), 'variable'] = 'rare_cat_variable'
+    cat_df['variable'] = cat_df['variable'].cat.remove_unused_categories()
+    cat_df['variable'] = cat_df['variable'].cat.codes
+    
+    # group rare cont_df variables and label encode
+    var_counts = cont_df.variable.value_counts()
+    rare_vars = var_counts.index[var_counts < 1000]
+    cont_df['variable'] = cont_df['variable'].cat.add_categories(['rare_cont_variable'])
+    cont_df.loc[cont_df['variable'].isin(rare_vars), 'variable'] = 'rare_cont_variable'
+    cont_df['variable'] = cont_df['variable'].astype('category')
+    cont_df['variable'] = cont_df['variable'].cat.remove_unused_categories()
+    cont_df['variable'] = cont_df['variable'].cat.codes + cat_df['variable'].max() + 1
 
     train_patient_ids = pickle.load(open(os.path.join(hf_subtype_output_dir, "train_patient_ids.pkl"), "rb"))
     cont_df['value'] = cont_df['value'].map(make_numeric)
     cont_df.dropna(subset=["value"], inplace=True)
     cont_df = normalize(cont_df, train_mrns=train_patient_ids, patient_id="patient_id")[0]
 
+    print(f"cat_df.variable.max(): {cat_df.variable.max()}")
+    print(f"cat_df.value.max(): {cat_df.value.max()}")
+    print(f"cont_df.variable.max(): {cont_df.variable.max()}")
 
     df = concatenate([cat_df, cont_df])
-    var_counts = df.variable.value_counts()
-    rare_vars = var_counts.index[var_counts < 1000]
-    df['variable'] = df['variable'].cat.add_categories(['rare_variable'])
-    df.loc[df['variable'].isin(rare_vars), 'variable'] = 'rare_variable'
-    df['variable'] = df['variable'].cat.remove_unused_categories()
-    df['variable'] = df['variable'].cat.codes
+
     df.sort_values(by=["patient_id", "date", "variable"], inplace=True)
     df.dropna(subset=['patient_id', 'date', 'variable', 'value'], inplace=True)
     df.to_pickle(os.path.join(hf_subtype_output_dir, "timeseries.pkl"))
@@ -318,6 +324,7 @@ def check_sufficient(data_dict, enc):
 
 
 def get_sufficient_encounters():
+    print("[GET SUFFICIENT ENCOUNTERS]")
     hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicAdmission/"
     cohort = pd.read_csv("/storage/nassim/projects/MIMIC-IV-Data-Pipeline/data/cohort/cohort_non-icu_all_0_.csv.gz", compression='gzip',header=0)
     cohort.rename(columns={"admittime": "date", "dischtime": "discharge_date", "subject_id": "patient_id"}, inplace=True)
@@ -329,11 +336,13 @@ def get_sufficient_encounters():
     encounters['discharge_date'] = pd.to_datetime(encounters.discharge_date)
     encounters = encounters[(((encounters.discharge_date - encounters.date) / pd.Timedelta(days=1)) >= 4/24)] # LOS must be at least 4 hours
     encounters.to_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
+    print(f"Number of encounters: {encounters.shape[0]}")
     sufficient_encounters = encounters[encounters.progress_apply(partial(check_sufficient, data_dict), axis=1)]
     sufficient_encounters.to_pickle(os.path.join(hf_subtype_output_dir, "sufficient_encounters.pkl"))
-    print(sufficient_encounters.shape)
+    print(f"Number of sufficient encounters: {sufficient_encounters.shape[0]}")
+
 
 # generate_inpatient_triplets()
 # generate_encounters_and_splits()
 # filter_data()
-# get_sufficient_encounters()
+get_sufficient_encounters()
