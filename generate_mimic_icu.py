@@ -175,7 +175,7 @@ def generate_icu_triplets():
     proc['variable'] = proc.variable.astype('category')
     proc['value'] = proc.value.astype(str).astype('category')
     proc['is_cat'] = 1
-    
+
     # triplet encode out
     print('processing out')
     out = out[['stay_id', 'charttime', 'itemid']]
@@ -270,7 +270,7 @@ def filter_data():
     cat_df.loc[cat_df['value'].isin(rare_values), 'value'] = 'rare_value'
     cat_df['value'] = cat_df['value'].cat.remove_unused_categories()
     cat_df['value'] = cat_df['value'].cat.codes
-    
+
     # group rare cat_df variables and label encode
     var_counts = cat_df.variable.value_counts()
     rare_vars = var_counts.index[var_counts < 1000]
@@ -278,7 +278,7 @@ def filter_data():
     cat_df.loc[cat_df['variable'].isin(rare_vars), 'variable'] = 'rare_cat_variable'
     cat_df['variable'] = cat_df['variable'].cat.remove_unused_categories()
     cat_df['variable'] = cat_df['variable'].cat.codes
-    
+
     # group rare cont_df variables and label encode
     var_counts = cont_df.variable.value_counts()
     rare_vars = var_counts.index[var_counts < 1000]
@@ -290,7 +290,7 @@ def filter_data():
 
     train_patient_ids = pickle.load(open(os.path.join(hf_subtype_output_dir, "train_patient_ids.pkl"), "rb"))
     cont_df = normalize(cont_df, train_mrns=train_patient_ids, patient_id="patient_id")[0]
-    
+
     print(f"cat_df.variable.max(): {cat_df.variable.max()}")
     print(f"cat_df.value.max(): {cat_df.value.max()}")
     print(f"cont_df.variable.max(): {cont_df.variable.max()}")
@@ -299,10 +299,29 @@ def filter_data():
 
     df.sort_values(by=["patient_id", "date", "variable"], inplace=True)
     df.dropna(subset=['patient_id', 'date', 'variable', 'value'], inplace=True)
+    assert df.is_cat.isna().sum() == 0
+    cohort = cohort[['stay_id', "intime", "outtime"]].rename(columns={"stay_id": "patient_id"})
+    cohort['intime'] = pd.to_datetime(cohort.intime)
+    cohort['outtime'] = pd.to_datetime(cohort.outtime)
+    df = df.merge(cohort[['patient_id', "intime", "outtime"]], on='patient_id', how='left')
+    print("Before filtering:", df.shape)
+    df = df[(df.intime <= df.date) & (df.date <= df.outtime)]
+    print("After filtering:", df.shape)
     df.to_pickle(os.path.join(hf_subtype_output_dir, "timeseries.pkl"))
     data_dict = dict(list(df.groupby("patient_id")))
     pickle.dump(data_dict, open(os.path.join(hf_subtype_output_dir, "timeseries_dict.pkl"), "wb"))
 
+
+def first_true_in_subsequence(series):
+    # Find the indices where the consecutive values change
+    mask = series.diff() == 1
+
+    # Include the first index if the first value is True
+    mask.iloc[0] = series.iloc[0]
+
+    # Extract only the True indices
+    mask = mask & series
+    return mask
 
 def generate_events():
     hf_subtype_output_dir = "/storage/shared/hf_subtype/datasets/MimicIcu"
@@ -327,34 +346,32 @@ def generate_events():
     bilirubin_itemids = ['225690']
     platelet_itemids = ['225170', '225678', '226369', '227071', '227457']
     wbc_itemids = ['220546']
-    
-    liver_enzyme_alt_itemid = ['220644'] #ALT
-    liver_enzyme_ast_itemid = ['220587'] #AST labs
-    
-    # import pdb; pdb.set_trace()
-    
+
+    liver_enzyme_alt_itemid = ['220644']  #ALT
+    liver_enzyme_ast_itemid = ['220587']  #AST labs
+
     liver_enzyme_alt_event = cont_df[cont_df.variable.isin(liver_enzyme_alt_itemid)]
     liver_enzyme_ast_event = cont_df[cont_df.variable.isin(liver_enzyme_ast_itemid)]
     liver_enzyme_alt_event = liver_enzyme_alt_event[liver_enzyme_alt_event.value > 3*56]
     liver_enzyme_ast_event = liver_enzyme_ast_event[liver_enzyme_ast_event.value > 3*40]
     liver_enzyme_event = concatenate([liver_enzyme_alt_event, liver_enzyme_ast_event])
-    
+
     wbc_event = cont_df[cont_df.variable.isin(wbc_itemids)]
     leukocytopenia_event = wbc_event[(wbc_event.value < 4)]
     leukocytosis_event = wbc_event[(wbc_event.value > 12)]
-    
+
     thrombocytopenia_event = cont_df[cont_df.variable.isin(platelet_itemids)]
     thrombocytopenia_event = thrombocytopenia_event[(thrombocytopenia_event.value < 50)]
 
     thrombocytosis_event = cont_df[cont_df.variable.isin(platelet_itemids)]
     thrombocytosis_event = thrombocytosis_event[(thrombocytosis_event.value > 500)] # 450,000 cells/nL
-    
+
     lactic_event = cont_df[cont_df.variable.isin(lactic_acid_itemids)]
     lactic_event = lactic_event[lactic_event.value > 2]
-    
+
     bilirubin_events = cont_df[cont_df.variable.isin(bilirubin_itemids)]
     bilirubin_events = bilirubin_events[bilirubin_events.value > 2]
-    
+
     hypoglycemia_event = cont_df[cont_df.variable.isin(glucose_itemids)]
     hypoglycemia_event = hypoglycemia_event[hypoglycemia_event.value < 70]
 
@@ -363,14 +380,25 @@ def generate_events():
     hyponatremia_event = cont_df[cont_df.variable.isin(sodium_itemids)]
     hyponatremia_event = hyponatremia_event[hyponatremia_event.value < 135]
 
-    hypotension_events = map_events[map_events.value <= 60]
+    map_events['hypotensive'] = map_events.value <= 60
+    map_events.sort_values(by=["stay_id", "date"], inplace=True)
+    map_events.reset_index(drop=True, inplace=True)
+    # quick test that first_true_in_subsequence returns the first hypotensive event in each subsequence
+    x = pd.Series([True, True, False, True, True, False, True])
+    assert first_true_in_subsequence(x).tolist() == [True, False, False, True, False, False, True]
+
+    # extract first hypotensive event in each consecutive sequence of hypotensive MAP readings
+    hypotension_events_mask = map_events.groupby("stay_id").hypotensive.apply(first_true_in_subsequence)
+    hypotension_events = map_events[hypotension_events_mask]
+    hypotension_events.drop(columns=["hypotensive"], inplace=True)
+
     hypoxia_events = pd.concat([pao2_events[pao2_events.value <= 60], sao2_events[sao2_events.value <= 90]])
 
     mechanical_vent_events = cat_df[cat_df.value.isin(mask_ventilation_itemids)]
 
     hemo_events = cont_df[cont_df.variable.isin(hemocrit_itemids)]
     hemo_events = hemo_events[hemo_events.value < 30]
-    
+
     ph_events = cont_df[cont_df.variable.isin(ph_itemids)]
     ph_events = ph_events[(ph_events.value < 7.35) | (ph_events.value > 7.45)]
 
@@ -381,28 +409,27 @@ def generate_events():
 
     events_dict = {
         "hypotension": hypotension_events,
-        "hypoxemia": hypoxia_events,
+        # "hypoxemia": hypoxia_events,
         "mechanical_ventilation": mechanical_vent_events,
-        "renal_dysfunction": renal_events,
-        "hypercapnia": hypercapnia_event,
-        "ph": ph_events,
-        "hyperkalemia": hyperkalemia_event,
-        "hyponatremia": hyponatremia_event,
-        "hypoglycemia": hypoglycemia_event,
-        "lactic_acidosis": lactic_event,
-        "bilirubin": bilirubin_events,
-        "thrombocytopenia": thrombocytopenia_event,
-        "thrombocytosis": thrombocytosis_event,
-        "leukocytopenia": leukocytopenia_event,
-        "leukocytosis": leukocytosis_event,
-        "liver_enzyme": liver_enzyme_event,
+        # "renal_dysfunction": renal_events,
+        # "hypercapnia": hypercapnia_event,
+        # "ph": ph_events,
+        # "hyperkalemia": hyperkalemia_event,
+        # "hyponatremia": hyponatremia_event,
+        # "hypoglycemia": hypoglycemia_event,
+        # "lactic_acidosis": lactic_event,
+        # "bilirubin": bilirubin_events,
+        # "thrombocytopenia": thrombocytopenia_event,
+        # "thrombocytosis": thrombocytosis_event,
+        # "leukocytopenia": leukocytopenia_event,
+        # "leukocytosis": leukocytosis_event,
+        # "liver_enzyme": liver_enzyme_event,
     }
     for event_type, event_df in events_dict.items():
         print(f"Number of {event_type} patients: {event_df.stay_id.nunique()}")
         event_df['type'] = event_type
         event_df['type'] = event_df['type'].astype('category')
     events = concatenate(events_dict.values(), ignore_index=True)
-    # import pdb; pdb.set_trace()
     events = events.merge(cohort[['stay_id', 'mortality_label', 'readmission_label', 'los_label', 'dod']], on='stay_id', how='left')
     events.rename(columns={"stay_id": "patient_id"}, inplace=True)
     events.to_pickle(os.path.join(hf_subtype_output_dir, "encounter.pkl"))
@@ -426,12 +453,12 @@ def get_processed_encounters():
     encounters = encounters.merge(cohort[['stay_id', 'intime', 'outtime']].rename(columns={'stay_id': "patient_id"}), on='patient_id', how='left')
     encounters.rename(columns={"outtime": "discharge_date"}, inplace=True)
     encounters = encounters[(encounters.date >= encounters.intime) & (encounters.date <= encounters.discharge_date)]
-    print("Before groupby:", encounters.shape)
+    # print("Before groupby:", encounters.shape)
     print(encounters.patient_id.nunique())
-    encounters.sort_values(by=["patient_id", "type", "date"], inplace=True)  # Sort by patient_id, type, and date
-    encounters.drop_duplicates(subset=['patient_id', 'type'], inplace=True, keep='first')  # Keep only the first encounter for each patient and type combination
+    # encounters.sort_values(by=["patient_id", "type", "date"], inplace=True)  # Sort by patient_id, type, and date
+    # encounters.drop_duplicates(subset=['patient_id', 'type'], inplace=True, keep='first')  # Keep only the first encounter for each patient and type combination
     encounters.reset_index(inplace=True, drop=True)
-    print("After groupby:", encounters.shape)
+    # print("After groupby:", encounters.shape)
     encounters.to_pickle(os.path.join(hf_subtype_output_dir, "processed_encounter.pkl"))
 
 
@@ -451,5 +478,5 @@ def get_sufficient_encounters():
 # generate_encounters_and_splits()
 # filter_data()
 # generate_events()
-# get_processed_encounters()
+get_processed_encounters()
 get_sufficient_encounters()
